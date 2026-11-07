@@ -38,9 +38,46 @@ public class BillingEventProcessor {
         }
     }
 
+    /**
+     * Deserializes the event object. Events sent on an older API version than the SDK pins
+     * are deserialized leniently; the fields read here (id, customer, amount_paid, currency)
+     * have the same shape across these versions.
+     */
+    private StripeObject dataObject(com.stripe.model.Event event) {
+        EventDataObjectDeserializer d = event.getDataObjectDeserializer();
+        java.util.Optional<StripeObject> o = d.getObject();
+        if (o.isPresent()) return o.get();
+        try {
+            return d.deserializeUnsafe();
+        } catch (Exception e) {
+            log.warn("Could not deserialize Stripe event {}: {}", event.getId(), e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Current period end: on subscription items in current API versions, on the
+     * subscription itself (current_period_end) in events from older API versions.
+     */
+    private long periodEnd(com.stripe.model.Event event, Subscription sub) {
+        if (sub.getItems() != null && sub.getItems().getData() != null) {
+            java.util.Optional<Long> fromItems = sub.getItems().getData().stream()
+                    .map(SubscriptionItem::getCurrentPeriodEnd)
+                    .filter(java.util.Objects::nonNull)
+                    .max(Long::compare);
+            if (fromItems.isPresent()) return fromItems.get();
+        }
+        com.google.gson.JsonElement raw = com.google.gson.JsonParser
+                .parseString(event.getDataObjectDeserializer().getRawJson())
+                .getAsJsonObject().get("current_period_end");
+        if (raw == null || raw.isJsonNull()) {
+            throw new IllegalStateException("Subscription " + sub.getId() + " has no current period end");
+        }
+        return raw.getAsLong();
+    }
+
     private void handleSubscriptionUpdated(com.stripe.model.Event event) {
-        Subscription sub = (Subscription) event.getDataObjectDeserializer()
-                .getObject().orElse(null);
+        Subscription sub = (Subscription) dataObject(event);
         if (sub == null) return;
 
         stripeCustomerRepository.findByStripeCustomerId(sub.getCustomer())
@@ -50,8 +87,8 @@ public class BillingEventProcessor {
 
                     licenseRepository.findByClientIdAndDeletedAtIsNull(customer.getClientId())
                             .ifPresent(license -> {
-                                Instant periodEnd = Instant.ofEpochSecond(
-                                        sub.getCurrentPeriodEnd());
+                                long latestEnd = periodEnd(event, sub);
+                                Instant periodEnd = Instant.ofEpochSecond(latestEnd);
                                 license.activate(periodEnd);
                                 licenseRepository.save(license);
                                 record(customer.getTenantId(), customer.getClientId(),
@@ -61,8 +98,7 @@ public class BillingEventProcessor {
     }
 
     private void handleSubscriptionDeleted(com.stripe.model.Event event) {
-        Subscription sub = (Subscription) event.getDataObjectDeserializer()
-                .getObject().orElse(null);
+        Subscription sub = (Subscription) dataObject(event);
         if (sub == null) return;
 
         stripeCustomerRepository.findByStripeCustomerId(sub.getCustomer())
@@ -78,8 +114,7 @@ public class BillingEventProcessor {
     }
 
     private void handleInvoicePaid(com.stripe.model.Event event) {
-        Invoice invoice = (Invoice) event.getDataObjectDeserializer()
-                .getObject().orElse(null);
+        Invoice invoice = (Invoice) dataObject(event);
         if (invoice == null) return;
 
         stripeCustomerRepository.findByStripeCustomerId(invoice.getCustomer())
@@ -92,8 +127,7 @@ public class BillingEventProcessor {
     }
 
     private void handlePaymentFailed(com.stripe.model.Event event) {
-        Invoice invoice = (Invoice) event.getDataObjectDeserializer()
-                .getObject().orElse(null);
+        Invoice invoice = (Invoice) dataObject(event);
         if (invoice == null) return;
 
         stripeCustomerRepository.findByStripeCustomerId(invoice.getCustomer())
