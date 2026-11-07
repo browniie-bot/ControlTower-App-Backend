@@ -26,7 +26,7 @@ repositories {
 ext {
 	mapstructVersion      = '1.6.3'
 	jjwtVersion           = '0.12.6'
-	stripeVersion         = '26.12.0'
+	stripeVersion         = '34.1.0'
 	testcontainersVersion = '1.20.4'
 	googleApiClientVersion = '2.20.0'
 }
